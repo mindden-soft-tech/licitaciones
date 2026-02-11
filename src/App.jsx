@@ -12,6 +12,7 @@ function App() {
   const [todoElBloque, setTodoElBloque] = useState([]);
   const [cargando, setCargando] = useState(false);
   const [soloIT, setSoloIT] = useState(true); 
+  const [verFavoritas, setVerFavoritas] = useState(false);
   const [paginaActual, setPaginaActual] = useState(1);
   const registrosPorPagina = 12;
 
@@ -36,12 +37,9 @@ function App() {
     }));
   };
 
-  // --- FILTRO CPV IT ESTRICTO: 7210... hasta 7290... ---
   const esTecnologiaReal = (titulo, cpv) => {
     if (!cpv) return false;
     const cpvStr = cpv.toString();
-    // Verificamos que empiece por 72 y que el cuarto dígito (índice 2) sea >= 1
-    // Esto cubre 721, 722, 723, 724, 725, 726, 727, 728, 729
     if (cpvStr.startsWith('72')) {
       const tercerDigito = parseInt(cpvStr.charAt(2));
       return tercerDigito >= 1 && tercerDigito <= 9;
@@ -99,7 +97,8 @@ function App() {
               Importe: parseFloat(budget?.["#text"] || budget || 0),
               Link: item.link?.[0]?.["@_href"] || item.link?.["@_href"] || "#",
               CPV: cpv || "",
-              esIT: esTecnologiaReal(titulo, cpv)
+              esIT: esTecnologiaReal(titulo, cpv),
+              favorito: false
             });
           });
         }
@@ -110,16 +109,49 @@ function App() {
         const db = e.target.result;
         const transaction = db.transaction(STORE_NAME, 'readwrite');
         const store = transaction.objectStore(STORE_NAME);
-        datosAcumulados.forEach(item => store.put(item));
+        
+        // Usamos put para no duplicar si ya existen, pero conservamos estado favorito si ya estaba
+        datosAcumulados.forEach(item => {
+            const getReq = store.get(item.id);
+            getReq.onsuccess = () => {
+                if (getReq.result) {
+                    // Si ya existe, mantenemos su estado de favorito actual
+                    store.put({ ...item, favorito: getReq.result.favorito });
+                } else {
+                    store.put(item);
+                }
+            };
+        });
+
         transaction.oncomplete = () => {
-          setTodoElBloque(prev => [...datosAcumulados, ...prev]);
-          setCargando(false);
+          const trans2 = db.transaction(STORE_NAME, 'readonly');
+          const store2 = trans2.objectStore(STORE_NAME);
+          const getAll = store2.getAll();
+          getAll.onsuccess = () => {
+              setTodoElBloque(getAll.result);
+              setCargando(false);
+          };
         };
       };
     } catch (err) {
       console.error(err);
       setCargando(false);
     }
+  };
+
+  const alternarFavorito = (id) => {
+    const nuevaLista = todoElBloque.map(l => 
+      l.id === id ? { ...l, favorito: !l.favorito } : l
+    );
+    setTodoElBloque(nuevaLista);
+
+    const registroActualizado = nuevaLista.find(l => l.id === id);
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onsuccess = (e) => {
+      const db = e.target.result;
+      const transaction = db.transaction(STORE_NAME, 'readwrite');
+      transaction.objectStore(STORE_NAME).put(registroActualizado);
+    };
   };
 
   const borrarBaseDeDatos = () => {
@@ -144,11 +176,12 @@ function App() {
   const filtrados = useMemo(() => {
     let resultado = todoElBloque.filter(l => {
       const cumpleIT = soloIT ? l.esIT : true;
+      const cumpleFavorito = verFavoritas ? l.favorito : true;
       const cumpleFecha = l.Fecha.includes(filtros.fecha);
       const cumpleTitulo = l.Titulo.toLowerCase().includes(filtros.titulo.toLowerCase());
       const cumpleOrganismo = l.Organismo.toLowerCase().includes(filtros.organismo.toLowerCase());
       const cumpleImporte = filtros.importeMin === '' || l.Importe >= parseFloat(filtros.importeMin);
-      return cumpleIT && cumpleFecha && cumpleTitulo && cumpleOrganismo && cumpleImporte;
+      return cumpleIT && cumpleFavorito && cumpleFecha && cumpleTitulo && cumpleOrganismo && cumpleImporte;
     });
 
     return resultado.sort((a, b) => {
@@ -157,10 +190,10 @@ function App() {
       if (orden.direccion === 'asc') return valA > valB ? 1 : -1;
       return valA < valB ? 1 : -1;
     });
-  }, [todoElBloque, soloIT, filtros, orden]);
+  }, [todoElBloque, soloIT, verFavoritas, filtros, orden]);
 
   const actuales = filtrados.slice((paginaActual - 1) * registrosPorPagina, paginaActual * registrosPorPagina);
-  const totalPaginas = Math.ceil(filtrados.length / registrosPorPagina);
+  const totalPaginas = Math.ceil(filtrados.length / registrosPorPagina) || 1;
 
   const estiloInputFiltro = { width: '100%', marginTop: '8px', padding: '6px', fontSize: '12px', fontWeight: 'normal', border: '1px solid #cbd5e1', borderRadius: '4px', boxSizing: 'border-box' };
   const btnBase = { padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontSize: '14px', display: 'inline-flex', alignItems: 'center', gap: '6px', textDecoration: 'none' };
@@ -182,9 +215,12 @@ function App() {
           </div>
         </div>
 
-        <div style={{ marginBottom: '20px' }}>
-          <button onClick={() => setSoloIT(!soloIT)} style={{ padding: '10px 20px', borderRadius: '8px', border: '1px solid #007bff', backgroundColor: soloIT ? '#e8f4fd' : 'white', color: '#007bff', cursor: 'pointer' }}>
+        <div style={{ marginBottom: '20px', display: 'flex', gap: '10px' }}>
+          <button onClick={() => { setSoloIT(!soloIT); setPaginaActual(1); }} style={{ padding: '10px 20px', borderRadius: '8px', border: '1px solid #007bff', backgroundColor: soloIT ? '#e8f4fd' : 'white', color: '#007bff', cursor: 'pointer' }}>
             {soloIT ? '✅ Filtrando IT' : '🔍 Ver Todas las Familias'}
+          </button>
+          <button onClick={() => { setVerFavoritas(!verFavoritas); setPaginaActual(1); }} style={{ padding: '10px 20px', borderRadius: '8px', border: '1px solid #e91e63', backgroundColor: verFavoritas ? '#fce4ec' : 'white', color: '#e91e63', cursor: 'pointer', fontWeight: 'bold' }}>
+            {verFavoritas ? '⭐ Viendo Favoritas' : '☆ Ver Favoritas'}
           </button>
         </div>
 
@@ -192,6 +228,7 @@ function App() {
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ backgroundColor: '#f1f5f9', borderBottom: '2px solid #e2e8f0' }}>
+                <th style={{ padding: '15px', textAlign: 'center', width: '50px' }}>⭐</th>
                 <th style={{ padding: '15px', textAlign: 'left', width: '15%' }}>
                   <div style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between' }} onClick={() => alternarOrden('Fecha')}>
                     <span>📅 Fecha</span>
@@ -199,7 +236,7 @@ function App() {
                   </div>
                   <input placeholder="Filtrar..." style={estiloInputFiltro} value={filtros.fecha} onChange={e => manejarCambioFiltro('fecha', e.target.value)} />
                 </th>
-                <th style={{ padding: '15px', textAlign: 'left', width: '45%' }}>
+                <th style={{ padding: '15px', textAlign: 'left', width: '40%' }}>
                   <div style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between' }} onClick={() => alternarOrden('Titulo')}>
                     <span>📄 Título</span>
                     <span>{orden.columna === 'Titulo' ? (orden.direccion === 'asc' ? '🔼' : '🔽') : ''}</span>
@@ -225,6 +262,14 @@ function App() {
             <tbody>
               {actuales.map(l => (
                 <tr key={l.id} style={{ borderBottom: '1px solid #f1f5f9', backgroundColor: l.esIT ? '#f0f9ff' : 'white' }}>
+                  <td style={{ padding: '15px', textAlign: 'center' }}>
+                    <button 
+                        onClick={() => alternarFavorito(l.id)} 
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '20px', filter: l.favorito ? 'none' : 'grayscale(100%)', opacity: l.favorito ? 1 : 0.3 }}
+                    >
+                        ⭐
+                    </button>
+                  </td>
                   <td style={{ padding: '15px', fontSize: '13px' }}>{l.Fecha}</td>
                   <td style={{ padding: '15px' }}>
                     <a href={l.Link} target="_blank" rel="noreferrer" style={{ textDecoration: 'none', color: '#1e40af', fontWeight: '600' }}>
@@ -240,12 +285,13 @@ function App() {
               ))}
             </tbody>
           </table>
+          {filtrados.length === 0 && <div style={{ textAlign: 'center', padding: '40px', color: '#64748b' }}>No se encontraron licitaciones con estos filtros.</div>}
         </div>
 
         <div style={{ marginTop: '20px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '15px' }}>
-          <button disabled={paginaActual === 1} onClick={() => setPaginaActual(p => p - 1)} style={{ ...btnBase, border: '1px solid #ddd', backgroundColor: 'white' }}>Anterior</button>
+          <button disabled={paginaActual === 1} onClick={() => setPaginaActual(p => p - 1)} style={{ ...btnBase, border: '1px solid #ddd', backgroundColor: 'white', opacity: paginaActual === 1 ? 0.5 : 1 }}>Anterior</button>
           <span style={{ fontSize: '14px' }}>Página <strong>{paginaActual}</strong> de {totalPaginas}</span>
-          <button disabled={paginaActual >= totalPaginas} onClick={() => setPaginaActual(p => p + 1)} style={{ ...btnBase, border: '1px solid #ddd', backgroundColor: 'white' }}>Siguiente</button>
+          <button disabled={paginaActual >= totalPaginas} onClick={() => setPaginaActual(p => p + 1)} style={{ ...btnBase, border: '1px solid #ddd', backgroundColor: 'white', opacity: paginaActual >= totalPaginas ? 0.5 : 1 }}>Siguiente</button>
         </div>
       </div>
     </div>
