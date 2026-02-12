@@ -22,7 +22,8 @@ function App() {
     fecha: '',
     titulo: '',
     organismo: '',
-    importeMin: ''
+    importeMin: '',
+    estado: '' 
   });
 
   const manejarCambioFiltro = (columna, valor) => {
@@ -47,6 +48,29 @@ function App() {
     return false;
   };
 
+  // MEJORA: Lógica de mapeo más robusta para capturar estados reales del XML
+  const mapearEstado = (codigo) => {
+    if (!codigo) return "Pendiente";
+    const c = String(codigo).toUpperCase().trim();
+    
+    // Convocatoria suele ser PUB (Publicada), CONV o simplemente cuando no hay resolución
+    if (c.includes("CONV") || c === "PUB") return "Convocatoria";
+    
+    // Evaluación: códigos EV, EVL o PRE
+    if (c.includes("EV") || c.includes("PRE")) return "Evaluación";
+    
+    // Adjudicada: códigos ADJ
+    if (c.includes("ADJ")) return "Adjudicada";
+    
+    // Formalizada: códigos RES (Resuelta) o cuando ya hay contrato formalizado
+    if (c.includes("RES") || c.includes("FOR")) return "Formalizada";
+    
+    // Anulada
+    if (c.includes("ANUL") || c.includes("SUSP")) return "Anulada";
+    
+    return "Otros";
+  };
+
   useEffect(() => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = (e) => {
@@ -60,7 +84,7 @@ function App() {
       const transaction = db.transaction(STORE_NAME, 'readonly');
       const store = transaction.objectStore(STORE_NAME);
       const getAll = store.getAll();
-      getAll.onsuccess = () => setTodoElBloque(getAll.result);
+      getAll.onsuccess = () => setTodoElBloque(getAll.result || []);
     };
   }, []);
 
@@ -88,15 +112,19 @@ function App() {
             const titulo = item.title?.["#text"] || item.title || "Sin título";
             const cpv = project?.["cac:RequiredCommodityClassification"]?.["cbc:ItemClassificationCode"]?.["#text"] 
                       || project?.["cac:RequiredCommodityClassification"]?.["cbc:ItemClassificationCode"];
+            
+            const estadoRaw = status?.["cbc-place-ext:ContractFolderStatusCode"]?.["#text"] 
+                             || status?.["cbc-place-ext:ContractFolderStatusCode"];
 
             datosAcumulados.push({
               id: item.id?.["#text"] || item.id || Math.random().toString(),
               Fecha: item.updated?.split('T')[0] || "N/A",
-              Titulo: titulo,
+              Titulo: String(titulo),
               Organismo: status?.["cac-place-ext:LocatedContractingParty"]?.["cac:Party"]?.["cac:PartyName"]?.["cbc:Name"] || "N/A",
               Importe: parseFloat(budget?.["#text"] || budget || 0),
               Link: item.link?.[0]?.["@_href"] || item.link?.["@_href"] || "#",
               CPV: cpv || "",
+              Estado: mapearEstado(estadoRaw),
               esIT: esTecnologiaReal(titulo, cpv),
               favorito: false
             });
@@ -110,12 +138,10 @@ function App() {
         const transaction = db.transaction(STORE_NAME, 'readwrite');
         const store = transaction.objectStore(STORE_NAME);
         
-        // Usamos put para no duplicar si ya existen, pero conservamos estado favorito si ya estaba
         datosAcumulados.forEach(item => {
             const getReq = store.get(item.id);
             getReq.onsuccess = () => {
                 if (getReq.result) {
-                    // Si ya existe, mantenemos su estado de favorito actual
                     store.put({ ...item, favorito: getReq.result.favorito });
                 } else {
                     store.put(item);
@@ -174,19 +200,20 @@ function App() {
   };
 
   const filtrados = useMemo(() => {
-    let resultado = todoElBloque.filter(l => {
+    return todoElBloque.filter(l => {
       const cumpleIT = soloIT ? l.esIT : true;
       const cumpleFavorito = verFavoritas ? l.favorito : true;
-      const cumpleFecha = l.Fecha.includes(filtros.fecha);
-      const cumpleTitulo = l.Titulo.toLowerCase().includes(filtros.titulo.toLowerCase());
-      const cumpleOrganismo = l.Organismo.toLowerCase().includes(filtros.organismo.toLowerCase());
+      const cumpleFecha = (l.Fecha || "").includes(filtros.fecha);
+      const cumpleTitulo = (l.Titulo || "").toLowerCase().includes(filtros.titulo.toLowerCase());
+      const cumpleOrganismo = (l.Organismo || "").toLowerCase().includes(filtros.organismo.toLowerCase());
+      // MEJORA: Comparación más segura
+      const cumpleEstado = filtros.estado === '' || String(l.Estado) === String(filtros.estado);
       const cumpleImporte = filtros.importeMin === '' || l.Importe >= parseFloat(filtros.importeMin);
-      return cumpleIT && cumpleFavorito && cumpleFecha && cumpleTitulo && cumpleOrganismo && cumpleImporte;
-    });
-
-    return resultado.sort((a, b) => {
-      const valA = a[orden.columna];
-      const valB = b[orden.columna];
+      
+      return cumpleIT && cumpleFavorito && cumpleFecha && cumpleTitulo && cumpleOrganismo && cumpleImporte && cumpleEstado;
+    }).sort((a, b) => {
+      const valA = a[orden.columna] || "";
+      const valB = b[orden.columna] || "";
       if (orden.direccion === 'asc') return valA > valB ? 1 : -1;
       return valA < valB ? 1 : -1;
     });
@@ -195,13 +222,24 @@ function App() {
   const actuales = filtrados.slice((paginaActual - 1) * registrosPorPagina, paginaActual * registrosPorPagina);
   const totalPaginas = Math.ceil(filtrados.length / registrosPorPagina) || 1;
 
-  const estiloInputFiltro = { width: '100%', marginTop: '8px', padding: '6px', fontSize: '12px', fontWeight: 'normal', border: '1px solid #cbd5e1', borderRadius: '4px', boxSizing: 'border-box' };
+  const estiloInputFiltro = { width: '100%', marginTop: '8px', padding: '6px', fontSize: '12px', fontWeight: 'normal', border: '1px solid #cbd5e1', borderRadius: '4px', boxSizing: 'border-box', height: '32px' };
   const btnBase = { padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontSize: '14px', display: 'inline-flex', alignItems: 'center', gap: '6px', textDecoration: 'none' };
 
+  const colorEstado = (estado) => {
+    const est = estado || "Pendiente";
+    if (est === "Adjudicada") return { bg: '#dcfce7', text: '#166534', desc: 'Ganador seleccionado' };
+    if (est === "Formalizada") return { bg: '#dbeafe', text: '#1e40af', desc: 'Contrato firmado' };
+    if (est === "Anulada") return { bg: '#fee2e2', text: '#991b1b', desc: 'Cancelada' };
+    if (est === "Evaluación") return { bg: '#fef3c7', text: '#92400e', desc: 'Revisando ofertas' };
+    if (est === "Convocatoria") return { bg: '#f3e8ff', text: '#6b21a8', desc: 'Abierta a ofertas' };
+    return { bg: '#f1f5f9', text: '#475569', desc: 'Otros estados' };
+  };
+
   return (
-    <div style={{ padding: '20px', backgroundColor: '#f8f9fa', minHeight: '100vh' }}>
-      <div style={{ maxWidth: '1300px', margin: '0 auto', background: 'white', padding: '25px', borderRadius: '10px', boxShadow: '0 4px 6px rgba(0,0,0,0.1)' }}>
+    <div style={{ padding: '20px', backgroundColor: '#f8f9fa', minHeight: '100vh', fontFamily: 'sans-serif' }}>
+      <div style={{ maxWidth: '1400px', margin: '0 auto', background: 'white', padding: '25px', borderRadius: '10px', boxShadow: '0 4px 6px rgba(0,0,0,0.1)' }}>
         
+        {/* CABECERA */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '25px' }}>
           <h1 style={{ color: '#2c3e50', fontSize: '24px', margin: 0 }}>💻 Radar Licitaciones IT</h1>
           <div style={{ display: 'flex', gap: '10px' }}>
@@ -215,47 +253,92 @@ function App() {
           </div>
         </div>
 
-        <div style={{ marginBottom: '20px', display: 'flex', gap: '10px' }}>
-          <button onClick={() => { setSoloIT(!soloIT); setPaginaActual(1); }} style={{ padding: '10px 20px', borderRadius: '8px', border: '1px solid #007bff', backgroundColor: soloIT ? '#e8f4fd' : 'white', color: '#007bff', cursor: 'pointer' }}>
-            {soloIT ? '✅ Filtrando IT' : '🔍 Ver Todas las Familias'}
-          </button>
-          <button onClick={() => { setVerFavoritas(!verFavoritas); setPaginaActual(1); }} style={{ padding: '10px 20px', borderRadius: '8px', border: '1px solid #e91e63', backgroundColor: verFavoritas ? '#fce4ec' : 'white', color: '#e91e63', cursor: 'pointer', fontWeight: 'bold' }}>
-            {verFavoritas ? '⭐ Viendo Favoritas' : '☆ Ver Favoritas'}
-          </button>
+        {/* LEYENDA Y BOTONES DE FILTRO RÁPIDO */}
+        <div style={{ marginBottom: '25px', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '20px', paddingBottom: '15px', borderBottom: '1px solid #eee' }}>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button onClick={() => { setSoloIT(!soloIT); setPaginaActual(1); }} style={{ padding: '10px 20px', borderRadius: '8px', border: '1px solid #007bff', backgroundColor: soloIT ? '#e8f4fd' : 'white', color: '#007bff', cursor: 'pointer', fontWeight: 'bold' }}>
+              {soloIT ? '✅ Filtrando IT' : '🔍 Ver Todas las Familias'}
+            </button>
+            <button onClick={() => { setVerFavoritas(!verFavoritas); setPaginaActual(1); }} style={{ padding: '10px 20px', borderRadius: '8px', border: '1px solid #e91e63', backgroundColor: verFavoritas ? '#fce4ec' : 'white', color: '#e91e63', cursor: 'pointer', fontWeight: 'bold' }}>
+              {verFavoritas ? '⭐ Viendo Favoritas' : '☆ Ver Favoritas'}
+            </button>
+          </div>
+
+          <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center', fontSize: '11px' }}>
+            <span style={{ fontWeight: 'bold', color: '#64748b', marginRight: '5px' }}>LEYENDA ESTADOS:</span>
+            {['Convocatoria', 'Evaluación', 'Adjudicada', 'Formalizada', 'Anulada'].map(est => {
+              const info = colorEstado(est);
+              return (
+                <div key={est} style={{ display: 'flex', alignItems: 'center', gap: '5px', background: info.bg, color: info.text, padding: '4px 8px', borderRadius: '4px', border: `1px solid ${info.text}20` }}>
+                  <span style={{ fontWeight: 'bold' }}>{est}:</span> <span>{info.desc}</span>
+                </div>
+              );
+            })}
+          </div>
         </div>
 
+        {/* TABLA CON FILTROS ALINEADOS */}
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ backgroundColor: '#f1f5f9', borderBottom: '2px solid #e2e8f0' }}>
-                <th style={{ padding: '15px', textAlign: 'center', width: '50px' }}>⭐</th>
-                <th style={{ padding: '15px', textAlign: 'left', width: '15%' }}>
-                  <div style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between' }} onClick={() => alternarOrden('Fecha')}>
-                    <span>📅 Fecha</span>
-                    <span>{orden.columna === 'Fecha' ? (orden.direccion === 'asc' ? '🔼' : '🔽') : ''}</span>
+                <th style={{ padding: '15px', textAlign: 'center', width: '40px' }}>⭐</th>
+                
+                <th style={{ padding: '15px', textAlign: 'left', width: '140px' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                    <div style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px' }} onClick={() => alternarOrden('Fecha')}>
+                      <span>📅 Fecha</span>
+                      <span style={{ fontSize: '10px' }}>{orden.columna === 'Fecha' ? (orden.direccion === 'asc' ? '🔼' : '🔽') : '↕️'}</span>
+                    </div>
+                    <input placeholder="Filtro..." style={estiloInputFiltro} value={filtros.fecha} onChange={e => manejarCambioFiltro('fecha', e.target.value)} />
                   </div>
-                  <input placeholder="Filtrar..." style={estiloInputFiltro} value={filtros.fecha} onChange={e => manejarCambioFiltro('fecha', e.target.value)} />
                 </th>
-                <th style={{ padding: '15px', textAlign: 'left', width: '40%' }}>
-                  <div style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between' }} onClick={() => alternarOrden('Titulo')}>
-                    <span>📄 Título</span>
-                    <span>{orden.columna === 'Titulo' ? (orden.direccion === 'asc' ? '🔼' : '🔽') : ''}</span>
+
+                <th style={{ padding: '15px', textAlign: 'left' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                    <div style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px' }} onClick={() => alternarOrden('Titulo')}>
+                      <span>📄 Título</span>
+                      <span style={{ fontSize: '10px' }}>{orden.columna === 'Titulo' ? (orden.direccion === 'asc' ? '🔼' : '🔽') : '↕️'}</span>
+                    </div>
+                    <input placeholder="Buscar título..." style={estiloInputFiltro} value={filtros.titulo} onChange={e => manejarCambioFiltro('titulo', e.target.value)} />
                   </div>
-                  <input placeholder="Buscar título..." style={estiloInputFiltro} value={filtros.titulo} onChange={e => manejarCambioFiltro('titulo', e.target.value)} />
                 </th>
-                <th style={{ padding: '15px', textAlign: 'left', width: '25%' }}>
-                  <div style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between' }} onClick={() => alternarOrden('Organismo')}>
-                    <span>🏛️ Organismo</span>
-                    <span>{orden.columna === 'Organismo' ? (orden.direccion === 'asc' ? '🔼' : '🔽') : ''}</span>
+
+                <th style={{ padding: '15px', textAlign: 'left', width: '220px' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                    <div style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px' }} onClick={() => alternarOrden('Organismo')}>
+                      <span>🏛️ Organismo</span>
+                      <span style={{ fontSize: '10px' }}>{orden.columna === 'Organismo' ? (orden.direccion === 'asc' ? '🔼' : '🔽') : '↕️'}</span>
+                    </div>
+                    <input placeholder="Filtrar..." style={estiloInputFiltro} value={filtros.organismo} onChange={e => manejarCambioFiltro('organismo', e.target.value)} />
                   </div>
-                  <input placeholder="Filtrar organismo..." style={estiloInputFiltro} value={filtros.organismo} onChange={e => manejarCambioFiltro('organismo', e.target.value)} />
                 </th>
-                <th style={{ padding: '15px', textAlign: 'right', width: '15%' }}>
-                  <div style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between' }} onClick={() => alternarOrden('Importe')}>
-                    <span>💰 Importe</span>
-                    <span>{orden.columna === 'Importe' ? (orden.direccion === 'asc' ? '🔼' : '🔽') : ''}</span>
+
+                <th style={{ padding: '15px', textAlign: 'center', width: '160px' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', alignItems: 'center' }}>
+                    <div style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px' }} onClick={() => alternarOrden('Estado')}>
+                      <span>📍 Estado</span>
+                      <span style={{ fontSize: '10px' }}>{orden.columna === 'Estado' ? (orden.direccion === 'asc' ? '🔼' : '🔽') : '↕️'}</span>
+                    </div>
+                    <select style={estiloInputFiltro} value={filtros.estado} onChange={e => manejarCambioFiltro('estado', e.target.value)}>
+                      <option value="">Todos</option>
+                      <option value="Convocatoria">Convocatoria</option>
+                      <option value="Evaluación">Evaluación</option>
+                      <option value="Adjudicada">Adjudicada</option>
+                      <option value="Formalizada">Formalizada</option>
+                      <option value="Anulada">Anulada</option>
+                    </select>
                   </div>
-                  <input type="number" placeholder="Min €" style={estiloInputFiltro} value={filtros.importeMin} onChange={e => manejarCambioFiltro('importeMin', e.target.value)} />
+                </th>
+
+                <th style={{ padding: '15px', textAlign: 'right', width: '140px' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', alignItems: 'flex-end' }}>
+                    <div style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px' }} onClick={() => alternarOrden('Importe')}>
+                      <span>💰 Importe</span>
+                      <span style={{ fontSize: '10px' }}>{orden.columna === 'Importe' ? (orden.direccion === 'asc' ? '🔼' : '🔽') : '↕️'}</span>
+                    </div>
+                    <input type="number" placeholder="Min €" style={estiloInputFiltro} value={filtros.importeMin} onChange={e => manejarCambioFiltro('importeMin', e.target.value)} />
+                  </div>
                 </th>
               </tr>
             </thead>
@@ -263,35 +346,36 @@ function App() {
               {actuales.map(l => (
                 <tr key={l.id} style={{ borderBottom: '1px solid #f1f5f9', backgroundColor: l.esIT ? '#f0f9ff' : 'white' }}>
                   <td style={{ padding: '15px', textAlign: 'center' }}>
-                    <button 
-                        onClick={() => alternarFavorito(l.id)} 
-                        style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '20px', filter: l.favorito ? 'none' : 'grayscale(100%)', opacity: l.favorito ? 1 : 0.3 }}
-                    >
-                        ⭐
-                    </button>
+                    <button onClick={() => alternarFavorito(l.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '20px', filter: l.favorito ? 'none' : 'grayscale(100%)', opacity: l.favorito ? 1 : 0.2 }}>⭐</button>
                   </td>
-                  <td style={{ padding: '15px', fontSize: '13px' }}>{l.Fecha}</td>
+                  <td style={{ padding: '15px', fontSize: '13px', color: '#475569' }}>{l.Fecha}</td>
                   <td style={{ padding: '15px' }}>
-                    <a href={l.Link} target="_blank" rel="noreferrer" style={{ textDecoration: 'none', color: '#1e40af', fontWeight: '600' }}>
+                    <a href={l.Link} target="_blank" rel="noreferrer" style={{ textDecoration: 'none', color: '#1e40af', fontWeight: '600', fontSize: '14px' }}>
                       {l.esIT && "💻 "}{l.Titulo}
                     </a>
                     {l.CPV && <div style={{ fontSize: '10px', color: '#64748b', marginTop: '4px' }}>CPV: {l.CPV}</div>}
                   </td>
                   <td style={{ padding: '15px', fontSize: '12px', color: '#475569' }}>{l.Organismo}</td>
-                  <td style={{ padding: '15px', textAlign: 'right', fontWeight: 'bold' }}>
+                  <td style={{ padding: '15px', textAlign: 'center' }}>
+                    <span style={{ padding: '4px 10px', borderRadius: '12px', fontSize: '10px', fontWeight: 'bold', backgroundColor: colorEstado(l.Estado).bg, color: colorEstado(l.Estado).text, display: 'inline-block', minWidth: '85px', textTransform: 'uppercase' }}>
+                      {l.Estado}
+                    </span>
+                  </td>
+                  <td style={{ padding: '15px', textAlign: 'right', fontWeight: 'bold', fontSize: '14px' }}>
                     {l.Importe > 0 ? new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(l.Importe) : '---'}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-          {filtrados.length === 0 && <div style={{ textAlign: 'center', padding: '40px', color: '#64748b' }}>No se encontraron licitaciones con estos filtros.</div>}
+          {filtrados.length === 0 && <div style={{ textAlign: 'center', padding: '60px', color: '#94a3b8', fontSize: '16px' }}>No hay licitaciones que coincidan con los filtros.</div>}
         </div>
 
-        <div style={{ marginTop: '20px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '15px' }}>
-          <button disabled={paginaActual === 1} onClick={() => setPaginaActual(p => p - 1)} style={{ ...btnBase, border: '1px solid #ddd', backgroundColor: 'white', opacity: paginaActual === 1 ? 0.5 : 1 }}>Anterior</button>
-          <span style={{ fontSize: '14px' }}>Página <strong>{paginaActual}</strong> de {totalPaginas}</span>
-          <button disabled={paginaActual >= totalPaginas} onClick={() => setPaginaActual(p => p + 1)} style={{ ...btnBase, border: '1px solid #ddd', backgroundColor: 'white', opacity: paginaActual >= totalPaginas ? 0.5 : 1 }}>Siguiente</button>
+        {/* PAGINACIÓN */}
+        <div style={{ marginTop: '25px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '20px' }}>
+          <button disabled={paginaActual === 1} onClick={() => setPaginaActual(p => p - 1)} style={{ ...btnBase, border: '1px solid #cbd5e1', backgroundColor: 'white', opacity: paginaActual === 1 ? 0.5 : 1 }}>⬅️ Anterior</button>
+          <span style={{ fontSize: '14px', color: '#475569' }}>Página <strong>{paginaActual}</strong> de {totalPaginas}</span>
+          <button disabled={paginaActual >= totalPaginas} onClick={() => setPaginaActual(p => p + 1)} style={{ ...btnBase, border: '1px solid #cbd5e1', backgroundColor: 'white', opacity: paginaActual >= totalPaginas ? 0.5 : 1 }}>Siguiente ➡️</button>
         </div>
       </div>
     </div>
